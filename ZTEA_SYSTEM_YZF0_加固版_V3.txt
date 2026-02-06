@@ -72,6 +72,16 @@ DATA: gt_tea       TYPE TABLE OF ztea_yzf0,
       gt_fcat      TYPE lvc_t_fcat,
       ls_fcat      TYPE lvc_s_fcat.
 
+" 各屏幕独立字段目录（避免共用 gt_fcat 导致 ALV XMLBLOB 数据错乱）
+DATA: gt_fcat_shop TYPE lvc_t_fcat,
+      ls_fcat_shop TYPE lvc_s_fcat.
+
+DATA: gt_fcat_my   TYPE lvc_t_fcat,
+      ls_fcat_my   TYPE lvc_s_fcat.
+
+DATA: gt_fcat_cart TYPE lvc_t_fcat,
+      ls_fcat_cart TYPE lvc_s_fcat.
+
 DATA: gt_rows TYPE lvc_t_row.
 DATA: gs_tea  TYPE ztea_yzf0.
 
@@ -329,6 +339,7 @@ MODULE user_command_0210 INPUT.
         ENDIF.
 
         DATA lv_money TYPE p DECIMALS 2.
+        CLEAR lv_money.  " 加固：防止上次充值金额残留影响本次校验
 
         TRY.
             lv_money = ls_sval-value.
@@ -451,6 +462,9 @@ MODULE user_command_0300 INPUT.
         RETURN.
       ENDIF.
 
+      " 加固：每次导出前清空，防止多次点击导出后数据重复累积
+      REFRESH lt_string.
+
       CONCATENATE '茶叶编号' '茶叶名称' '单价' '库存数量' '产地' '生产批次'
         INTO lv_string SEPARATED BY lv_tab.
       APPEND lv_string TO lt_string.
@@ -531,6 +545,9 @@ MODULE user_command_0300 INPUT.
 
       lv_filepath = ls_file_table-filename.
 
+      " 加固：清空导入工作区，防止多次导入时残留旧数据
+      REFRESH: lt_upload_data, lt_raw_data.
+
       CALL FUNCTION 'TEXT_CONVERT_XLS_TO_SAP'
         EXPORTING
           i_line_header        = 'X'
@@ -554,6 +571,7 @@ MODULE user_command_0300 INPUT.
         ENDIF.
 
         DATA ls_tea_db TYPE ztea_yzf0.
+        CLEAR ls_tea_db.  " 加固：防止上一轮循环残留字段写入脏数据
         MOVE-CORRESPONDING ls_data TO ls_tea_db.
         MODIFY ztea_yzf0 FROM ls_tea_db.
       ENDLOOP.
@@ -818,6 +836,9 @@ MODULE user_command_0400 INPUT.
         DATA: lv_ship_ok   TYPE i VALUE 0,
               lv_ship_skip TYPE i VALUE 0.
 
+        " 加固：DATA VALUE 仅首次生效，后续进入须手动清零
+        CLEAR: lv_ship_ok, lv_ship_skip.
+
         LOOP AT gt_rows INTO DATA(ls_row_ord).
           READ TABLE gt_show_fix INTO DATA(ls_show_sel) INDEX ls_row_ord-index.
           IF sy-subrc <> 0.
@@ -882,20 +903,20 @@ MODULE status_0500 OUTPUT.
     CREATE OBJECT go_alv_shop
       EXPORTING i_parent = go_cont_shop.
 
-    REFRESH gt_fcat.
-    CLEAR ls_fcat.
+    REFRESH gt_fcat_shop.
+    CLEAR ls_fcat_shop.
 
-    ls_fcat-fieldname = 'TEA_NAME'. ls_fcat-coltext = '茶叶名称'. APPEND ls_fcat TO gt_fcat. CLEAR ls_fcat.
-    ls_fcat-fieldname = 'PRICE'.    ls_fcat-coltext = '单价'.     APPEND ls_fcat TO gt_fcat. CLEAR ls_fcat.
-    ls_fcat-fieldname = 'STOCK'.    ls_fcat-coltext = '剩余库存'. APPEND ls_fcat TO gt_fcat. CLEAR ls_fcat.
-    ls_fcat-fieldname = 'ORIGIN'.   ls_fcat-coltext = '产地'.     APPEND ls_fcat TO gt_fcat.
+    ls_fcat_shop-fieldname = 'TEA_NAME'. ls_fcat_shop-coltext = '茶叶名称'. APPEND ls_fcat_shop TO gt_fcat_shop. CLEAR ls_fcat_shop.
+    ls_fcat_shop-fieldname = 'PRICE'.    ls_fcat_shop-coltext = '单价'.     APPEND ls_fcat_shop TO gt_fcat_shop. CLEAR ls_fcat_shop.
+    ls_fcat_shop-fieldname = 'STOCK'.    ls_fcat_shop-coltext = '剩余库存'. APPEND ls_fcat_shop TO gt_fcat_shop. CLEAR ls_fcat_shop.
+    ls_fcat_shop-fieldname = 'ORIGIN'.   ls_fcat_shop-coltext = '产地'.     APPEND ls_fcat_shop TO gt_fcat_shop.
 
     SELECT * FROM ztea_yzf0 INTO TABLE gt_tea.
 
     go_alv_shop->set_table_for_first_display(
       CHANGING
         it_outtab       = gt_tea
-        it_fieldcatalog = gt_fcat
+        it_fieldcatalog = gt_fcat_shop
     ).
   ELSE.
     SELECT * FROM ztea_yzf0 INTO TABLE gt_tea.
@@ -920,6 +941,10 @@ MODULE user_command_0500 INPUT.
         MESSAGE '请先选中一款茶叶！' TYPE 'W'.
       ELSE.
         DATA lv_changed TYPE abap_bool VALUE abap_false.
+        DATA lv_oos_count TYPE i.
+        " 加固：DATA VALUE 仅首次生效，后续进入须手动清零
+        CLEAR: lv_changed, lv_oos_count.
+
         LOOP AT gt_rows INTO DATA(ls_row_shop).
           READ TABLE gt_tea INTO DATA(ls_tea_shop) INDEX ls_row_shop-index.
           IF sy-subrc <> 0.
@@ -927,7 +952,8 @@ MODULE user_command_0500 INPUT.
           ENDIF.
 
           IF ls_tea_shop-stock <= 0.
-            MESSAGE '手慢了！这款茶已经卖光了。' TYPE 'E'.
+            " 加固：不再用 MESSAGE TYPE 'E'（会中断 LOOP 导致部分数据丢失），改为计数后统一报告
+            lv_oos_count = lv_oos_count + 1.
             CONTINUE.
           ENDIF.
 
@@ -954,9 +980,17 @@ MODULE user_command_0500 INPUT.
 
         IF lv_changed = abap_true.
           COMMIT WORK.
-          MESSAGE '成功加入购物车！' TYPE 'S'.
+          IF lv_oos_count > 0.
+            MESSAGE |加入购物车成功！（{ lv_oos_count } 款已售罄，已自动跳过）| TYPE 'S'.
+          ELSE.
+            MESSAGE '成功加入购物车！' TYPE 'S'.
+          ENDIF.
         ELSE.
-          MESSAGE '未成功加入购物车，请重试。' TYPE 'W'.
+          IF lv_oos_count > 0.
+            MESSAGE '所选商品均已售罄，无法加入购物车。' TYPE 'W'.
+          ELSE.
+            MESSAGE '未成功加入购物车，请重试。' TYPE 'W'.
+          ENDIF.
         ENDIF.
       ENDIF.
 
@@ -1082,20 +1116,20 @@ MODULE status_0600 OUTPUT.
     CREATE OBJECT go_cont_my EXPORTING container_name = 'CC_MY_ORD'.
     CREATE OBJECT go_alv_my  EXPORTING i_parent = go_cont_my.
 
-    REFRESH gt_fcat.
-    CLEAR ls_fcat.
+    REFRESH gt_fcat_my.
+    CLEAR ls_fcat_my.
 
-    ls_fcat-fieldname = 'ORDER_ID'.   ls_fcat-coltext = '订单号'.   APPEND ls_fcat TO gt_fcat. CLEAR ls_fcat.
-    ls_fcat-fieldname = 'TEA_NAME'.   ls_fcat-coltext = '商品名称'. APPEND ls_fcat TO gt_fcat. CLEAR ls_fcat.
-    ls_fcat-fieldname = 'QUANTITY'.   ls_fcat-coltext = '购买数量'. APPEND ls_fcat TO gt_fcat. CLEAR ls_fcat.
-    ls_fcat-fieldname = 'AMOUNT'.     ls_fcat-coltext = '消费金额'. APPEND ls_fcat TO gt_fcat. CLEAR ls_fcat.
-    ls_fcat-fieldname = 'ORDER_DATE'. ls_fcat-coltext = '下单日期'. APPEND ls_fcat TO gt_fcat. CLEAR ls_fcat.
-    ls_fcat-fieldname = 'STATUS_TXT'. ls_fcat-coltext = '当前状态'. APPEND ls_fcat TO gt_fcat.
+    ls_fcat_my-fieldname = 'ORDER_ID'.   ls_fcat_my-coltext = '订单号'.   APPEND ls_fcat_my TO gt_fcat_my. CLEAR ls_fcat_my.
+    ls_fcat_my-fieldname = 'TEA_NAME'.   ls_fcat_my-coltext = '商品名称'. APPEND ls_fcat_my TO gt_fcat_my. CLEAR ls_fcat_my.
+    ls_fcat_my-fieldname = 'QUANTITY'.   ls_fcat_my-coltext = '购买数量'. APPEND ls_fcat_my TO gt_fcat_my. CLEAR ls_fcat_my.
+    ls_fcat_my-fieldname = 'AMOUNT'.     ls_fcat_my-coltext = '消费金额'. APPEND ls_fcat_my TO gt_fcat_my. CLEAR ls_fcat_my.
+    ls_fcat_my-fieldname = 'ORDER_DATE'. ls_fcat_my-coltext = '下单日期'. APPEND ls_fcat_my TO gt_fcat_my. CLEAR ls_fcat_my.
+    ls_fcat_my-fieldname = 'STATUS_TXT'. ls_fcat_my-coltext = '当前状态'. APPEND ls_fcat_my TO gt_fcat_my.
 
     go_alv_my->set_table_for_first_display(
       CHANGING
         it_outtab       = gt_my_show_fix
-        it_fieldcatalog = gt_fcat
+        it_fieldcatalog = gt_fcat_my
     ).
   ELSE.
     IF go_alv_my IS BOUND.
@@ -1198,18 +1232,18 @@ MODULE status_0700 OUTPUT.
     CREATE OBJECT go_cont_cart EXPORTING container_name = 'CC_CART'.
     CREATE OBJECT go_alv_cart  EXPORTING i_parent = go_cont_cart.
 
-    REFRESH gt_fcat.
-    CLEAR ls_fcat.
+    REFRESH gt_fcat_cart.
+    CLEAR ls_fcat_cart.
 
-    ls_fcat-fieldname = 'TEA_NAME'. ls_fcat-coltext = '茶叶名称'. APPEND ls_fcat TO gt_fcat. CLEAR ls_fcat.
-    ls_fcat-fieldname = 'PRICE'.    ls_fcat-coltext = '单价'.     APPEND ls_fcat TO gt_fcat. CLEAR ls_fcat.
-    ls_fcat-fieldname = 'QUANTITY'. ls_fcat-coltext = '购买数量'. APPEND ls_fcat TO gt_fcat. CLEAR ls_fcat.
-    ls_fcat-fieldname = 'TOTAL'.    ls_fcat-coltext = '小计金额'. APPEND ls_fcat TO gt_fcat.
+    ls_fcat_cart-fieldname = 'TEA_NAME'. ls_fcat_cart-coltext = '茶叶名称'. APPEND ls_fcat_cart TO gt_fcat_cart. CLEAR ls_fcat_cart.
+    ls_fcat_cart-fieldname = 'PRICE'.    ls_fcat_cart-coltext = '单价'.     APPEND ls_fcat_cart TO gt_fcat_cart. CLEAR ls_fcat_cart.
+    ls_fcat_cart-fieldname = 'QUANTITY'. ls_fcat_cart-coltext = '购买数量'. APPEND ls_fcat_cart TO gt_fcat_cart. CLEAR ls_fcat_cart.
+    ls_fcat_cart-fieldname = 'TOTAL'.    ls_fcat_cart-coltext = '小计金额'. APPEND ls_fcat_cart TO gt_fcat_cart.
 
     go_alv_cart->set_table_for_first_display(
       CHANGING
         it_outtab       = gt_cart_show
-        it_fieldcatalog = gt_fcat
+        it_fieldcatalog = gt_fcat_cart
     ).
   ELSE.
     DATA ls_stable_cart TYPE lvc_s_stbl.
@@ -1618,6 +1652,8 @@ MODULE user_command_0850 INPUT.
         DATA ls_new_msg TYPE zmsg_yzf0.
         CLEAR ls_new_msg.
 
+        " 加固：用 GET TIME 刷新时间后取 msg_id，若主键冲突则重试一次
+        GET TIME.
         ls_new_msg-msg_id   = sy-uzeit.
         ls_new_msg-userid   = gv_user_id.
         ls_new_msg-content  = gv_msg_input.
@@ -1625,12 +1661,21 @@ MODULE user_command_0850 INPUT.
         ls_new_msg-msg_time = sy-uzeit.
 
         INSERT zmsg_yzf0 FROM ls_new_msg.
+        IF sy-subrc <> 0.
+          " 加固：主键冲突时等一秒后重试（同秒多次发布保护）
+          WAIT UP TO 1 SECONDS.
+          GET TIME.
+          ls_new_msg-msg_id   = sy-uzeit.
+          ls_new_msg-msg_time = sy-uzeit.
+          INSERT zmsg_yzf0 FROM ls_new_msg.
+        ENDIF.
+
         IF sy-subrc = 0.
           COMMIT WORK.
           MESSAGE '留言发布成功！' TYPE 'S'.
           CLEAR gv_msg_input.
         ELSE.
-          MESSAGE '发布失败，请重试。' TYPE 'E'.
+          MESSAGE '发布失败，请稍后重试。' TYPE 'E'.
         ENDIF.
       ENDIF.
       LEAVE TO SCREEN 850.
@@ -1674,6 +1719,7 @@ MODULE user_command_0850 INPUT.
         ls_field_msg-tabname   = 'ZMSG_YZF0'.
         ls_field_msg-fieldname = 'REPLY'.
         ls_field_msg-fieldtext = '请输入回复内容'.
+        ls_field_msg-field_attr = ' '.
         APPEND ls_field_msg TO lt_fields_msg.
 
         CALL FUNCTION 'POPUP_GET_VALUES'
