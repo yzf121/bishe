@@ -1,0 +1,1719 @@
+*&---------------------------------------------------------------------*
+*& Report ZTEA_SYSTEM_YZF0
+*& 茶叶售卖管理系统 - 主程序（Hardened）
+*&---------------------------------------------------------------------*
+REPORT ztea_system_yzf0.
+
+TYPE-POOLS: truxs.
+
+* =========================================================
+* 0) 全局变量
+* =========================================================
+DATA: gv_user_id    TYPE char10,    "账号
+      gv_password   TYPE char20,    "密码
+      gv_user_role  TYPE char1,     "角色 (U-用户, A-管理员)
+      gv_mode       TYPE char1,     "茶叶维护模式 'A'=新增, 'E'=修改（必须全局）
+      gv_is_admin   TYPE abap_bool, "留言板服务端权限判断
+      ok_code       TYPE sy-ucomm.  "按钮指令
+
+* =========================================================
+* 1) 为防止 ALV 崩溃：订单显示表定义为全局变量（固定内存地址）
+* =========================================================
+* --- 补充：为了防止 ALV 崩溃，必须将显示表定义为全局变量 ---
+* 1. 管理员订单显示结构（显示用：在订单表基础上补充商品名、状态中文）
+TYPES: BEGIN OF ty_ord_show_fix,
+         order_id   TYPE zorder_yzf0-order_id,   "订单号
+         userid     TYPE zorder_yzf0-userid,     "买家账号
+         tea_id     TYPE zorder_yzf0-tea_id,     "商品编号(技术字段)
+         quantity   TYPE zorder_yzf0-quantity,   "数量
+         amount     TYPE zorder_yzf0-amount,     "总金额
+         order_date TYPE zorder_yzf0-order_date, "下单日期
+         status     TYPE zorder_yzf0-status,     "状态码(技术字段)
+         tea_name   TYPE ztea_yzf0-tea_name,     "商品名称（补全显示）
+         status_txt TYPE char20,                 "状态中文（补全显示）
+       END OF ty_ord_show_fix.
+
+DATA: gt_show_fix TYPE STANDARD TABLE OF ty_ord_show_fix WITH DEFAULT KEY. " 全局表
+
+" Screen 400 订单管理 ALV 专用字段目录（避免与其它 ALV 复用造成错位/脏数据）
+DATA: gt_fcat_ord TYPE lvc_t_fcat,
+      ls_fcat_ord TYPE lvc_s_fcat.
+
+
+* 2. 用户订单显示结构（显示用：在订单表基础上补充商品名、状态中文）
+TYPES: BEGIN OF ty_my_ord_show_fix,
+         order_id   TYPE zorder_yzf0-order_id,
+         userid     TYPE zorder_yzf0-userid,
+         tea_id     TYPE zorder_yzf0-tea_id,
+         quantity   TYPE zorder_yzf0-quantity,
+         amount     TYPE zorder_yzf0-amount,
+         order_date TYPE zorder_yzf0-order_date,
+         status     TYPE zorder_yzf0-status,
+         tea_name   TYPE ztea_yzf0-tea_name,
+         status_txt TYPE char20,
+       END OF ty_my_ord_show_fix.
+
+DATA: gt_my_show_fix TYPE STANDARD TABLE OF ty_my_ord_show_fix WITH DEFAULT KEY. " 全局表
+
+
+
+* --- 登录界面单选按钮变量 ---
+DATA: r_user  TYPE char1,
+      r_admin TYPE char1.
+
+* --- 注册/个人中心 ---
+DATA: gs_reg_user  TYPE zuser_yzf0,
+      gs_user_info TYPE zuser_yzf0.
+
+* --- ALV相关对象 (库存/订单/商城/购物车) ---
+DATA: gt_tea       TYPE TABLE OF ztea_yzf0,
+      go_container TYPE REF TO cl_gui_custom_container,
+      go_alv       TYPE REF TO cl_gui_alv_grid,
+      gt_fcat      TYPE lvc_t_fcat,
+      ls_fcat      TYPE lvc_s_fcat.
+
+DATA: gt_rows TYPE lvc_t_row.
+DATA: gs_tea  TYPE ztea_yzf0.
+
+DATA: gt_order    TYPE TABLE OF zorder_yzf0,
+      go_cont_ord TYPE REF TO cl_gui_custom_container,
+      go_alv_ord  TYPE REF TO cl_gui_alv_grid.
+
+DATA: go_cont_shop TYPE REF TO cl_gui_custom_container,
+      go_alv_shop  TYPE REF TO cl_gui_alv_grid.
+
+DATA: gt_my_order TYPE TABLE OF zorder_yzf0,
+      go_cont_my  TYPE REF TO cl_gui_custom_container,
+      go_alv_my   TYPE REF TO cl_gui_alv_grid.
+
+* --- Screen 400 订单管理(管理员) 专用变量 ---
+DATA: gv_search_oid   TYPE zorder_yzf0-order_id,
+      gt_all_orders   TYPE TABLE OF zorder_yzf0,
+      go_cont_ord_mgt TYPE REF TO cl_gui_custom_container,
+      go_alv_ord_mgt  TYPE REF TO cl_gui_alv_grid.
+
+* --- 购物车显示结构 ---
+TYPES: BEGIN OF ty_cart_show,
+         tea_id   TYPE ztea_yzf0-tea_id,
+         tea_name TYPE ztea_yzf0-tea_name,
+         price    TYPE ztea_yzf0-price,
+         quantity TYPE zcart_yzf0-quantity,
+         total    TYPE p DECIMALS 2,
+       END OF ty_cart_show.
+
+DATA: gt_cart_show TYPE TABLE OF ty_cart_show,
+      go_cont_cart TYPE REF TO cl_gui_custom_container,
+      go_alv_cart  TYPE REF TO cl_gui_alv_grid.
+
+* --- Screen 800 用户管理 ---
+DATA: gt_user_mgt TYPE TABLE OF zuser_yzf0,
+      go_cont_usr TYPE REF TO cl_gui_custom_container,
+      go_alv_usr  TYPE REF TO cl_gui_alv_grid.
+
+DATA: gt_fcat_usr TYPE lvc_t_fcat,
+      ls_fcat_usr TYPE lvc_s_fcat.
+
+* --- Screen 850 留言板 ---
+DATA: gt_msg       TYPE TABLE OF zmsg_yzf0,
+      gv_msg_input TYPE zmsg_yzf0-content,
+      go_cont_msg  TYPE REF TO cl_gui_custom_container,
+      go_alv_msg   TYPE REF TO cl_gui_alv_grid.
+
+* =========================================================
+* 2) 小工具：生成数字订单号（NUMC10思路）
+* =========================================================
+FORM get_next_order_id  CHANGING cv_order_id TYPE zorder_yzf0-order_id.
+  DATA: lv_db_max  TYPE zorder_yzf0-order_id,
+        lv_num10   TYPE n LENGTH 10.
+
+  SELECT MAX( order_id ) FROM zorder_yzf0 INTO @lv_db_max.
+
+  IF lv_db_max IS INITIAL.
+    lv_num10 = '1000000000'.
+  ELSE.
+    " 只允许纯数字，否则回退
+    IF lv_db_max CO '0123456789'.
+      lv_num10 = lv_db_max.
+    ELSE.
+      lv_num10 = '1000000000'.
+    ENDIF.
+  ENDIF.
+
+  lv_num10 = lv_num10 + 1.
+  cv_order_id = lv_num10.
+ENDFORM.
+
+* =========================================================
+* 3) 程序入口
+* =========================================================
+START-OF-SELECTION.
+  CALL SCREEN 100.
+
+* =========================================================
+* Screen 100 登录
+* =========================================================
+MODULE user_command_0100 INPUT.
+  ok_code = sy-ucomm.
+
+  CASE ok_code.
+    WHEN 'REGISTER'.
+      CLEAR gs_reg_user.
+      CALL SCREEN 110.
+
+    WHEN 'LOGIN'.
+      IF r_admin = 'X'.
+        SELECT SINGLE * FROM zadmin_yzf0 INTO @DATA(ls_admin)
+          WHERE admin_id = @gv_user_id.
+
+        IF sy-subrc = 0 AND ls_admin-password = gv_password.
+          MESSAGE '管理员登录成功！' TYPE 'S'.
+          gv_user_role = 'A'.
+          CALL SCREEN 900.
+        ELSEIF sy-subrc = 0.
+          MESSAGE '管理员密码错误！' TYPE 'E'.
+        ELSE.
+          MESSAGE '管理员账号不存在！' TYPE 'E'.
+        ENDIF.
+
+      ELSE.
+        SELECT SINGLE * FROM zuser_yzf0 INTO @DATA(ls_user)
+          WHERE userid = @gv_user_id.
+
+        IF sy-subrc = 0 AND ls_user-password = gv_password.
+          MESSAGE '用户登录成功！' TYPE 'S'.
+          gv_user_role = 'U'.
+          CALL SCREEN 200.
+        ELSEIF sy-subrc = 0.
+          MESSAGE '用户密码错误！' TYPE 'E'.
+        ELSE.
+          MESSAGE '用户账号不存在！' TYPE 'E'.
+        ENDIF.
+      ENDIF.
+
+    WHEN 'EXIT' OR 'CANCEL' OR 'BACK'.
+      LEAVE PROGRAM.
+  ENDCASE.
+
+  CLEAR ok_code.
+ENDMODULE.
+
+MODULE status_0100 OUTPUT.
+ENDMODULE.
+
+* =========================================================
+* Screen 110 注册
+* =========================================================
+MODULE status_0110 OUTPUT.
+ENDMODULE.
+
+MODULE user_command_0110 INPUT.
+  ok_code = sy-ucomm.
+
+  CASE ok_code.
+    WHEN 'SUBMIT_REG'.
+      IF gs_reg_user-userid IS INITIAL OR gs_reg_user-password IS INITIAL.
+        MESSAGE '账号和密码不能为空！' TYPE 'E'.
+      ENDIF.
+
+      SELECT SINGLE userid FROM zuser_yzf0 INTO @DATA(lv_exist)
+        WHERE userid = @gs_reg_user-userid.
+
+      IF sy-subrc = 0.
+        MESSAGE '该账号已被注册，请换一个！' TYPE 'E'.
+      ENDIF.
+
+      gs_reg_user-role    = 'U'.
+      gs_reg_user-balance = 0.
+
+      INSERT zuser_yzf0 FROM gs_reg_user.
+      IF sy-subrc = 0.
+        COMMIT WORK.
+        MESSAGE '注册成功！请登录。' TYPE 'S'.
+        LEAVE TO SCREEN 0.
+      ELSE.
+        MESSAGE '注册失败，请重试。' TYPE 'E'.
+      ENDIF.
+
+    WHEN 'CANCEL' OR 'BACK'.
+      LEAVE TO SCREEN 0.
+  ENDCASE.
+
+  CLEAR ok_code.
+ENDMODULE.
+
+* =========================================================
+* Screen 200 菜单（用户/管理员共用）
+* =========================================================
+MODULE user_command_0200 INPUT.
+  ok_code = sy-ucomm.
+
+  CASE ok_code.
+    WHEN 'TEA_MGT'.
+      IF gv_user_role = 'A'.
+        CALL SCREEN 300.
+      ELSE.
+        MESSAGE '权限不足！只有管理员可以使用此功能。' TYPE 'E'.
+      ENDIF.
+
+    WHEN 'ORD_MGT'.
+      IF gv_user_role = 'A'.
+        CALL SCREEN 400.
+      ELSE.
+        MESSAGE '权限不足！只有管理员可以使用此功能。' TYPE 'E'.
+      ENDIF.
+
+    WHEN 'MSG_BOARD'.
+      CALL SCREEN 850.
+
+    WHEN 'BUY_TEA'.
+      CALL SCREEN 500.
+
+    WHEN 'MY_ORD'.
+      CALL SCREEN 600.
+
+    WHEN 'MY_INFO'.
+      CALL SCREEN 210.
+
+    WHEN 'EXIT' OR 'BACK' OR 'CANCEL'.
+      LEAVE TO SCREEN 100.
+  ENDCASE.
+
+  CLEAR ok_code.
+ENDMODULE.
+
+MODULE status_0200 OUTPUT.
+ENDMODULE.
+
+* =========================================================
+* Screen 210 个人中心
+* =========================================================
+MODULE status_0210 OUTPUT.
+  SELECT SINGLE * FROM zuser_yzf0 INTO gs_user_info
+    WHERE userid = gv_user_id.
+ENDMODULE.
+
+MODULE user_command_0210 INPUT.
+  ok_code = sy-ucomm.
+
+  CASE ok_code.
+    WHEN 'TOPUP'.
+      DATA: lt_sval TYPE TABLE OF sval,
+            ls_sval TYPE sval,
+            lv_rc   TYPE char1.
+
+      REFRESH lt_sval.
+      CLEAR: ls_sval, lv_rc.
+
+      ls_sval-tabname    = 'ZUSER_YZF0'.
+      ls_sval-fieldname  = 'BALANCE'.
+      ls_sval-fieldtext  = '请输入充值金额'.
+      ls_sval-value      = ''.
+      ls_sval-field_attr = ' '.
+      APPEND ls_sval TO lt_sval.
+
+      CALL FUNCTION 'POPUP_GET_VALUES'
+        EXPORTING
+          popup_title     = '钱包充值'
+        IMPORTING
+          returncode      = lv_rc
+        TABLES
+          fields          = lt_sval
+        EXCEPTIONS
+          error_in_fields = 1
+          OTHERS          = 2.
+
+      IF lv_rc = ''.
+        READ TABLE lt_sval INTO ls_sval INDEX 1.
+        IF sy-subrc <> 0.
+          MESSAGE '读取输入失败，请重试。' TYPE 'E'.
+        ENDIF.
+
+        DATA lv_money TYPE p DECIMALS 2.
+
+        TRY.
+            lv_money = ls_sval-value.
+          CATCH cx_sy_conversion_no_number.
+            MESSAGE '金额格式不正确，请输入数字。' TYPE 'E'.
+        ENDTRY.
+
+        IF lv_money <= 0.
+          MESSAGE '充值金额必须大于 0 ！' TYPE 'W'.
+        ELSE.
+          UPDATE zuser_yzf0 SET balance = balance + @lv_money
+            WHERE userid = @gv_user_id.
+          IF sy-subrc = 0.
+            COMMIT WORK.
+            MESSAGE '充值成功！余额已更新。' TYPE 'S'.
+            gs_user_info-balance = gs_user_info-balance + lv_money.
+          ELSE.
+            MESSAGE '充值失败，请重试。' TYPE 'E'.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+
+    WHEN 'SAVE_INFO'.
+      UPDATE zuser_yzf0 SET phone    = @gs_user_info-phone,
+                            address  = @gs_user_info-address,
+                            password = @gs_user_info-password
+        WHERE userid = @gs_user_info-userid.
+
+      IF sy-subrc = 0.
+        COMMIT WORK.
+        MESSAGE '个人信息修改成功！' TYPE 'S'.
+      ELSE.
+        MESSAGE '修改失败！' TYPE 'E'.
+      ENDIF.
+
+    WHEN 'BACK' OR 'CANCEL'.
+      LEAVE TO SCREEN 0.
+  ENDCASE.
+
+  CLEAR ok_code.
+ENDMODULE.
+
+* =========================================================
+* Screen 300 库存管理（管理员）
+* =========================================================
+MODULE status_0300 OUTPUT.
+  IF go_container IS INITIAL.
+    CREATE OBJECT go_container
+      EXPORTING container_name = 'CC_ALV'.
+
+    CREATE OBJECT go_alv
+      EXPORTING i_parent = go_container.
+
+    REFRESH gt_fcat.
+    CLEAR   ls_fcat.
+
+    ls_fcat-fieldname = 'TEA_ID'.   ls_fcat-coltext = '茶叶编号'. APPEND ls_fcat TO gt_fcat.
+    CLEAR ls_fcat.
+    ls_fcat-fieldname = 'TEA_NAME'. ls_fcat-coltext = '茶叶名称'. APPEND ls_fcat TO gt_fcat.
+    CLEAR ls_fcat.
+    ls_fcat-fieldname = 'PRICE'.    ls_fcat-coltext = '单价'.     APPEND ls_fcat TO gt_fcat.
+    CLEAR ls_fcat.
+    ls_fcat-fieldname = 'STOCK'.    ls_fcat-coltext = '库存数量'. APPEND ls_fcat TO gt_fcat.
+    CLEAR ls_fcat.
+    ls_fcat-fieldname = 'ORIGIN'.   ls_fcat-coltext = '产地'.     APPEND ls_fcat TO gt_fcat.
+    CLEAR ls_fcat.
+    ls_fcat-fieldname = 'BATCH_NO'. ls_fcat-coltext = '生产批次'. APPEND ls_fcat TO gt_fcat.
+
+    SELECT * FROM ztea_yzf0 INTO TABLE gt_tea.
+
+    go_alv->set_table_for_first_display(
+      CHANGING
+        it_outtab       = gt_tea
+        it_fieldcatalog = gt_fcat
+    ).
+  ELSE.
+    SELECT * FROM ztea_yzf0 INTO TABLE gt_tea.
+
+    DATA ls_stable_0300 TYPE lvc_s_stbl.
+    ls_stable_0300-row = 'X'.
+    ls_stable_0300-col = 'X'.
+
+    IF go_alv IS BOUND.
+      go_alv->refresh_table_display( is_stable = ls_stable_0300 ).
+    ENDIF.
+  ENDIF.
+ENDMODULE.
+
+MODULE user_command_0300 INPUT.
+  ok_code = sy-ucomm.
+
+  IF go_alv IS BOUND.
+    go_alv->get_selected_rows( IMPORTING et_index_rows = gt_rows ).
+  ELSE.
+    REFRESH gt_rows.
+  ENDIF.
+
+  CASE ok_code.
+    WHEN 'EXPORT'.
+      DATA: lv_filename TYPE string,
+            lv_path     TYPE string,
+            lv_fullpath TYPE string,
+            lt_string   TYPE TABLE OF string,
+            lv_string   TYPE string,
+            lv_tab      TYPE c VALUE cl_abap_char_utilities=>horizontal_tab.
+
+      cl_gui_frontend_services=>file_save_dialog(
+        EXPORTING
+          window_title      = '保存茶叶库存表'
+          default_extension = 'XLS'
+          default_file_name = 'tea_stock.xls'
+        CHANGING
+          filename          = lv_filename
+          path              = lv_path
+          fullpath          = lv_fullpath
+      ).
+
+      IF lv_fullpath IS INITIAL.
+        CLEAR ok_code.
+        RETURN.
+      ENDIF.
+
+      CONCATENATE '茶叶编号' '茶叶名称' '单价' '库存数量' '产地' '生产批次'
+        INTO lv_string SEPARATED BY lv_tab.
+      APPEND lv_string TO lt_string.
+
+      LOOP AT gt_tea INTO DATA(ls_tea_exp).
+        DATA: lv_price_str TYPE char20,
+              lv_stock_str TYPE char20,
+              lv_batch_str TYPE char20.
+
+        lv_price_str = ls_tea_exp-price.
+        lv_stock_str = ls_tea_exp-stock.
+        lv_batch_str = ls_tea_exp-batch_no.
+
+        CONDENSE: lv_price_str, lv_stock_str, lv_batch_str.
+
+        CONCATENATE ls_tea_exp-tea_id
+                    ls_tea_exp-tea_name
+                    lv_price_str
+                    lv_stock_str
+                    ls_tea_exp-origin
+                    lv_batch_str
+          INTO lv_string SEPARATED BY lv_tab.
+        APPEND lv_string TO lt_string.
+      ENDLOOP.
+
+      CALL FUNCTION 'GUI_DOWNLOAD'
+        EXPORTING
+          filename = lv_fullpath
+          filetype = 'ASC'
+        TABLES
+          data_tab = lt_string
+        EXCEPTIONS
+          OTHERS   = 1.
+
+      IF sy-subrc = 0.
+        MESSAGE '导出成功！(含生产批次)' TYPE 'S'.
+      ELSE.
+        MESSAGE '导出失败。' TYPE 'E'.
+      ENDIF.
+
+    WHEN 'IMPORT'.
+      TYPES: BEGIN OF ty_upload_excel,
+               tea_id   TYPE ztea_yzf0-tea_id,
+               tea_name TYPE ztea_yzf0-tea_name,
+               price    TYPE ztea_yzf0-price,
+               stock    TYPE ztea_yzf0-stock,
+               origin   TYPE ztea_yzf0-origin,
+               batch_no TYPE ztea_yzf0-batch_no,
+             END OF ty_upload_excel.
+
+      DATA: lt_upload_data TYPE TABLE OF ty_upload_excel,
+            lt_raw_data    TYPE truxs_t_text_data,
+            lv_filepath    TYPE rlgrap-filename,
+            lt_file_table  TYPE filetable,
+            ls_file_table  TYPE file_table,
+            lv_rc_file     TYPE i.
+
+      cl_gui_frontend_services=>file_open_dialog(
+        EXPORTING
+          window_title      = '选择要上传的 Excel 文件'
+          default_extension = 'XLS'
+        CHANGING
+          file_table        = lt_file_table
+          rc                = lv_rc_file
+      ).
+
+      IF lv_rc_file <= 0.
+        CLEAR ok_code.
+        RETURN.
+      ENDIF.
+
+      READ TABLE lt_file_table INTO ls_file_table INDEX 1.
+      IF sy-subrc <> 0 OR ls_file_table-filename IS INITIAL.
+        MESSAGE '未选择文件。' TYPE 'W'.
+        CLEAR ok_code.
+        RETURN.
+      ENDIF.
+
+      lv_filepath = ls_file_table-filename.
+
+      CALL FUNCTION 'TEXT_CONVERT_XLS_TO_SAP'
+        EXPORTING
+          i_line_header        = 'X'
+          i_filename           = lv_filepath
+        TABLES
+          i_tab_raw_data       = lt_raw_data
+          i_tab_converted_data = lt_upload_data
+        EXCEPTIONS
+          conversion_failed    = 1
+          OTHERS               = 2.
+
+      IF sy-subrc <> 0.
+        MESSAGE '导入失败，请检查 Excel 格式。' TYPE 'E'.
+        CLEAR ok_code.
+        RETURN.
+      ENDIF.
+
+      LOOP AT lt_upload_data INTO DATA(ls_data).
+        IF ls_data-tea_id IS INITIAL.
+          CONTINUE.
+        ENDIF.
+
+        DATA ls_tea_db TYPE ztea_yzf0.
+        MOVE-CORRESPONDING ls_data TO ls_tea_db.
+        MODIFY ztea_yzf0 FROM ls_tea_db.
+      ENDLOOP.
+
+      COMMIT WORK.
+      MESSAGE '导入成功！(含生产批次)' TYPE 'S'.
+
+      SELECT * FROM ztea_yzf0 INTO TABLE gt_tea.
+      IF go_alv IS BOUND.
+        go_alv->refresh_table_display( ).
+      ENDIF.
+
+    WHEN 'DELETE'.
+      DATA: lt_rows_del TYPE lvc_t_row,
+            ls_row_del  TYPE lvc_s_row,
+            lv_answer   TYPE char1.
+
+      IF go_alv IS NOT BOUND.
+        MESSAGE '表格未初始化，请返回后重新进入。' TYPE 'W'.
+        CLEAR ok_code.
+        RETURN.
+      ENDIF.
+
+      go_alv->get_selected_rows( IMPORTING et_index_rows = lt_rows_del ).
+
+      IF lt_rows_del IS INITIAL.
+        MESSAGE '请先选中要删除的茶叶！' TYPE 'W'.
+      ELSE.
+        CALL FUNCTION 'POPUP_TO_CONFIRM'
+          EXPORTING
+            titlebar              = '删除警告'
+            text_question         = '确定要永久删除选中的茶叶吗？此操作无法撤销！'
+            text_button_1         = '是'
+            text_button_2         = '否'
+            default_button        = '2'
+            display_cancel_button = ''
+          IMPORTING
+            answer                = lv_answer.
+
+        IF lv_answer = '1'.
+          SORT lt_rows_del BY index DESCENDING.
+
+          LOOP AT lt_rows_del INTO ls_row_del.
+            READ TABLE gt_tea INTO DATA(ls_tea_del) INDEX ls_row_del-index.
+            IF sy-subrc <> 0.
+              CONTINUE.
+            ENDIF.
+
+            DELETE FROM ztea_yzf0 WHERE tea_id = @ls_tea_del-tea_id.
+            IF sy-subrc = 0.
+              DELETE gt_tea INDEX ls_row_del-index.
+            ENDIF.
+          ENDLOOP.
+
+          COMMIT WORK.
+          MESSAGE '删除成功！' TYPE 'S'.
+
+          DATA ls_stable_del TYPE lvc_s_stbl.
+          ls_stable_del-row = 'X'.
+          ls_stable_del-col = 'X'.
+          go_alv->refresh_table_display( is_stable = ls_stable_del ).
+        ELSE.
+          MESSAGE '操作已取消' TYPE 'S'.
+        ENDIF.
+      ENDIF.
+
+    WHEN 'ADD'.
+      gv_mode = 'A'.
+      CLEAR gs_tea.
+      CALL SCREEN 310.
+
+    WHEN 'EDIT'.
+      gv_mode = 'E'.
+      IF gt_rows IS INITIAL.
+        MESSAGE '请先选中一行要修改的茶叶！' TYPE 'W'.
+      ELSE.
+        READ TABLE gt_rows INTO DATA(ls_row_idx) INDEX 1.
+        IF sy-subrc = 0.
+          READ TABLE gt_tea INTO gs_tea INDEX ls_row_idx-index.
+          IF sy-subrc = 0.
+            CALL SCREEN 310.
+          ELSE.
+            MESSAGE '读取选中行失败，请重试。' TYPE 'W'.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+
+    WHEN 'BACK' OR 'EXIT' OR 'CANCEL'.
+      IF go_alv IS BOUND.
+        go_alv->free( ).
+        FREE go_alv.
+      ENDIF.
+      IF go_container IS BOUND.
+        go_container->free( ).
+        FREE go_container.
+      ENDIF.
+      LEAVE TO SCREEN 0.
+  ENDCASE.
+
+  CLEAR ok_code.
+ENDMODULE.
+
+* =========================================================
+* Screen 310 茶叶新增/修改
+* =========================================================
+MODULE status_0310 OUTPUT.
+  LOOP AT SCREEN.
+    IF gv_mode = 'E'.
+      IF screen-name = 'GS_TEA-TEA_ID'.
+        screen-input = '0'.
+        MODIFY SCREEN.
+      ENDIF.
+    ELSE.
+      IF screen-name = 'GS_TEA-TEA_ID'.
+        screen-input = '1'.
+        MODIFY SCREEN.
+      ENDIF.
+    ENDIF.
+  ENDLOOP.
+ENDMODULE.
+
+MODULE user_command_0310 INPUT.
+  ok_code = sy-ucomm.
+
+  CASE ok_code.
+    WHEN 'SAVE'.
+      IF gs_tea-tea_id IS INITIAL.
+        MESSAGE '编号不能为空！' TYPE 'E'.
+      ENDIF.
+
+      IF gv_mode = 'A'.
+        SELECT SINGLE tea_id FROM ztea_yzf0 INTO @DATA(lv_check)
+          WHERE tea_id = @gs_tea-tea_id.
+        IF sy-subrc = 0.
+          MESSAGE '该茶叶编号已存在！请勿重复添加。' TYPE 'E'.
+        ENDIF.
+      ENDIF.
+
+      MODIFY ztea_yzf0 FROM gs_tea.
+      IF sy-subrc = 0.
+        COMMIT WORK.
+        MESSAGE '保存成功！' TYPE 'S'.
+        LEAVE TO SCREEN 0.
+      ELSE.
+        MESSAGE '保存失败，请重试。' TYPE 'E'.
+      ENDIF.
+
+    WHEN 'CANCEL' OR 'BACK'.
+      LEAVE TO SCREEN 0.
+  ENDCASE.
+
+  CLEAR ok_code.
+ENDMODULE.
+
+* =========================================================
+* Screen 400 订单管理（管理员）
+* =========================================================
+MODULE status_0400 OUTPUT.
+  REFRESH gt_show_fix.
+
+  IF gv_search_oid IS INITIAL.
+    SELECT * FROM zorder_yzf0 INTO TABLE gt_order.
+  ELSE.
+    DATA lv_search_str_fix TYPE string.
+    CONCATENATE '%' gv_search_oid '%' INTO lv_search_str_fix.
+    SELECT * FROM zorder_yzf0 INTO TABLE gt_order
+      WHERE order_id LIKE lv_search_str_fix.
+  ENDIF.
+
+  DATA ls_show_fix LIKE LINE OF gt_show_fix.
+
+  LOOP AT gt_order INTO DATA(ls_db_fix).
+    CLEAR ls_show_fix.
+    MOVE-CORRESPONDING ls_db_fix TO ls_show_fix.
+
+    SELECT SINGLE tea_name FROM ztea_yzf0 INTO @ls_show_fix-tea_name
+      WHERE tea_id = @ls_db_fix-tea_id.
+    IF ls_show_fix-tea_name IS INITIAL.
+      ls_show_fix-tea_name = '该商品已下架'.
+    ENDIF.
+
+    CASE ls_db_fix-status.
+      WHEN '1'. ls_show_fix-status_txt = '已付款，待发货'.
+      WHEN '2'. ls_show_fix-status_txt = '商家已发货'.
+      WHEN '3'. ls_show_fix-status_txt = '已收货，交易完成'.
+      WHEN OTHERS. ls_show_fix-status_txt = '未知状态'.
+    ENDCASE.
+
+    APPEND ls_show_fix TO gt_show_fix.
+  ENDLOOP.
+
+  IF go_cont_ord IS INITIAL.
+    CREATE OBJECT go_cont_ord EXPORTING container_name = 'CC_ALV_ORD'.
+    CREATE OBJECT go_alv_ord  EXPORTING i_parent = go_cont_ord.
+
+    REFRESH gt_fcat_ord.
+    CLEAR ls_fcat_ord.
+
+    ls_fcat_ord-fieldname = 'ORDER_ID'.   ls_fcat_ord-coltext = '订单号'.   ls_fcat_ord-col_pos = 1.
+    ls_fcat_ord-ref_table = 'ZORDER_YZF0'. ls_fcat_ord-ref_field = 'ORDER_ID'.
+    APPEND ls_fcat_ord TO gt_fcat_ord. CLEAR ls_fcat_ord.
+
+    ls_fcat_ord-fieldname = 'USERID'.     ls_fcat_ord-coltext = '买家账号'. ls_fcat_ord-col_pos = 2.
+    ls_fcat_ord-ref_table = 'ZORDER_YZF0'. ls_fcat_ord-ref_field = 'USERID'.
+    APPEND ls_fcat_ord TO gt_fcat_ord. CLEAR ls_fcat_ord.
+
+    ls_fcat_ord-fieldname = 'TEA_NAME'.   ls_fcat_ord-coltext = '商品名称'. ls_fcat_ord-col_pos = 3.
+    ls_fcat_ord-outputlen = 30.
+    APPEND ls_fcat_ord TO gt_fcat_ord. CLEAR ls_fcat_ord.
+
+    ls_fcat_ord-fieldname = 'QUANTITY'.   ls_fcat_ord-coltext = '数量'.     ls_fcat_ord-col_pos = 4.
+    ls_fcat_ord-ref_table = 'ZORDER_YZF0'. ls_fcat_ord-ref_field = 'QUANTITY'.
+    APPEND ls_fcat_ord TO gt_fcat_ord. CLEAR ls_fcat_ord.
+
+    ls_fcat_ord-fieldname = 'AMOUNT'.     ls_fcat_ord-coltext = '总金额'.   ls_fcat_ord-col_pos = 5.
+    ls_fcat_ord-ref_table = 'ZORDER_YZF0'. ls_fcat_ord-ref_field = 'AMOUNT'.
+    APPEND ls_fcat_ord TO gt_fcat_ord. CLEAR ls_fcat_ord.
+
+    ls_fcat_ord-fieldname = 'ORDER_DATE'. ls_fcat_ord-coltext = '下单日期'. ls_fcat_ord-col_pos = 6.
+    ls_fcat_ord-ref_table = 'ZORDER_YZF0'. ls_fcat_ord-ref_field = 'ORDER_DATE'.
+    APPEND ls_fcat_ord TO gt_fcat_ord. CLEAR ls_fcat_ord.
+
+    ls_fcat_ord-fieldname = 'STATUS_TXT'. ls_fcat_ord-coltext = '当前状态'. ls_fcat_ord-col_pos = 7.
+    ls_fcat_ord-outputlen = 20.
+    APPEND ls_fcat_ord TO gt_fcat_ord. CLEAR ls_fcat_ord.
+
+    go_alv_ord->set_table_for_first_display(
+      EXPORTING
+        is_layout       = VALUE lvc_s_layo( grid_title = '订单管理列表' zebra = 'X' cwidth_opt = 'X' sel_mode = 'A' )
+      CHANGING
+        it_outtab       = gt_show_fix
+        it_fieldcatalog = gt_fcat_ord
+    ).
+
+  ELSE.
+    IF go_alv_ord IS BOUND.
+      go_alv_ord->refresh_table_display( is_stable = VALUE lvc_s_stbl( row = 'X' col = 'X' ) ).
+    ENDIF.
+  ENDIF.
+ENDMODULE.
+
+MODULE user_command_0400 INPUT.
+  ok_code = sy-ucomm.
+
+  IF go_alv_ord IS BOUND.
+    go_alv_ord->get_selected_rows( IMPORTING et_index_rows = gt_rows ).
+  ELSE.
+    REFRESH gt_rows.
+  ENDIF.
+
+  CASE ok_code.
+    WHEN 'SHIP'.
+      IF go_alv_ord IS NOT BOUND.
+        MESSAGE '列表未初始化，请返回后重新进入订单管理。' TYPE 'W'.
+        CLEAR ok_code.
+        RETURN.
+      ENDIF.
+
+      IF gt_rows IS INITIAL.
+        MESSAGE '请先选中一个订单！' TYPE 'W'.
+      ELSE.
+        DATA: lv_ship_ok   TYPE i VALUE 0,
+              lv_ship_skip TYPE i VALUE 0.
+
+        LOOP AT gt_rows INTO DATA(ls_row_ord).
+          READ TABLE gt_show_fix INTO DATA(ls_show_sel) INDEX ls_row_ord-index.
+          IF sy-subrc <> 0.
+            CONTINUE.
+          ENDIF.
+
+          " 仅允许：已付款 -> 待发货(1) 才能发货
+          IF ls_show_sel-status <> '1'.
+            lv_ship_skip = lv_ship_skip + 1.
+            CONTINUE.
+          ENDIF.
+
+          " 加固：WHERE 里带上原状态，避免并发/重复点击导致状态错乱
+          UPDATE zorder_yzf0
+             SET status = '2'
+           WHERE order_id = @ls_show_sel-order_id
+             AND status   = '1'.
+
+          IF sy-subrc = 0.
+            lv_ship_ok = lv_ship_ok + 1.
+          ENDIF.
+        ENDLOOP.
+
+        COMMIT WORK.
+
+        IF lv_ship_ok > 0.
+          MESSAGE |发货成功：{ lv_ship_ok } 单。| TYPE 'S'.
+        ELSEIF lv_ship_skip > 0.
+          MESSAGE '所选订单均不处于“待发货”状态，未执行发货。' TYPE 'I'.
+        ELSE.
+          MESSAGE '未找到可发货订单，请刷新后重试。' TYPE 'W'.
+        ENDIF.
+
+        LEAVE TO SCREEN 400.
+      ENDIF.
+
+    WHEN 'SEARCH'.
+      LEAVE TO SCREEN 400.
+
+    WHEN 'BACK' OR 'EXIT' OR 'CANCEL'.
+      IF go_alv_ord IS BOUND.
+        go_alv_ord->free( ).
+        FREE go_alv_ord.
+      ENDIF.
+      IF go_cont_ord IS BOUND.
+        go_cont_ord->free( ).
+        FREE go_cont_ord.
+      ENDIF.
+      LEAVE TO SCREEN 0.
+  ENDCASE.
+
+  CLEAR ok_code.
+ENDMODULE.
+
+* =========================================================
+* Screen 500 茶叶商城
+* =========================================================
+MODULE status_0500 OUTPUT.
+  IF go_cont_shop IS INITIAL.
+    CREATE OBJECT go_cont_shop
+      EXPORTING container_name = 'CC_SHOP'.
+    CREATE OBJECT go_alv_shop
+      EXPORTING i_parent = go_cont_shop.
+
+    REFRESH gt_fcat.
+    CLEAR ls_fcat.
+
+    ls_fcat-fieldname = 'TEA_NAME'. ls_fcat-coltext = '茶叶名称'. APPEND ls_fcat TO gt_fcat. CLEAR ls_fcat.
+    ls_fcat-fieldname = 'PRICE'.    ls_fcat-coltext = '单价'.     APPEND ls_fcat TO gt_fcat. CLEAR ls_fcat.
+    ls_fcat-fieldname = 'STOCK'.    ls_fcat-coltext = '剩余库存'. APPEND ls_fcat TO gt_fcat. CLEAR ls_fcat.
+    ls_fcat-fieldname = 'ORIGIN'.   ls_fcat-coltext = '产地'.     APPEND ls_fcat TO gt_fcat.
+
+    SELECT * FROM ztea_yzf0 INTO TABLE gt_tea.
+
+    go_alv_shop->set_table_for_first_display(
+      CHANGING
+        it_outtab       = gt_tea
+        it_fieldcatalog = gt_fcat
+    ).
+  ELSE.
+    SELECT * FROM ztea_yzf0 INTO TABLE gt_tea.
+    IF go_alv_shop IS BOUND.
+      go_alv_shop->refresh_table_display( ).
+    ENDIF.
+  ENDIF.
+ENDMODULE.
+
+MODULE user_command_0500 INPUT.
+  ok_code = sy-ucomm.
+
+  IF go_alv_shop IS BOUND.
+    go_alv_shop->get_selected_rows( IMPORTING et_index_rows = gt_rows ).
+  ELSE.
+    REFRESH gt_rows.
+  ENDIF.
+
+  CASE ok_code.
+    WHEN 'ADD_CART'.
+      IF gt_rows IS INITIAL.
+        MESSAGE '请先选中一款茶叶！' TYPE 'W'.
+      ELSE.
+        DATA lv_changed TYPE abap_bool VALUE abap_false.
+        LOOP AT gt_rows INTO DATA(ls_row_shop).
+          READ TABLE gt_tea INTO DATA(ls_tea_shop) INDEX ls_row_shop-index.
+          IF sy-subrc <> 0.
+            CONTINUE.
+          ENDIF.
+
+          IF ls_tea_shop-stock <= 0.
+            MESSAGE '手慢了！这款茶已经卖光了。' TYPE 'E'.
+            CONTINUE.
+          ENDIF.
+
+          DATA ls_cart TYPE zcart_yzf0.
+          SELECT SINGLE * FROM zcart_yzf0 INTO @ls_cart
+            WHERE userid = @gv_user_id
+              AND tea_id = @ls_tea_shop-tea_id.
+
+          IF sy-subrc = 0.
+            ls_cart-quantity = ls_cart-quantity + 1.
+            MODIFY zcart_yzf0 FROM ls_cart.
+          ELSE.
+            CLEAR ls_cart.
+            ls_cart-userid   = gv_user_id.
+            ls_cart-tea_id   = ls_tea_shop-tea_id.
+            ls_cart-quantity = 1.
+            INSERT zcart_yzf0 FROM ls_cart.
+          ENDIF.
+
+          IF sy-subrc = 0.
+            lv_changed = abap_true.
+          ENDIF.
+        ENDLOOP.
+
+        IF lv_changed = abap_true.
+          COMMIT WORK.
+          MESSAGE '成功加入购物车！' TYPE 'S'.
+        ELSE.
+          MESSAGE '未成功加入购物车，请重试。' TYPE 'W'.
+        ENDIF.
+      ENDIF.
+
+    WHEN 'VIEW_CART'.
+      CALL SCREEN 700.
+
+    WHEN 'BUY_TEA' OR 'BUY_NOW'.
+      IF gt_rows IS INITIAL.
+        MESSAGE '请先选中一款要买的茶！' TYPE 'W'.
+      ELSE.
+        READ TABLE gt_rows INTO DATA(ls_row_now) INDEX 1.
+        READ TABLE gt_tea  INTO DATA(ls_tea_now) INDEX ls_row_now-index.
+        IF sy-subrc <> 0.
+          MESSAGE '读取选中商品失败，请重试。' TYPE 'W'.
+        ELSEIF ls_tea_now-stock <= 0.
+          MESSAGE '没货了！' TYPE 'E'.
+        ELSE.
+          DATA lv_amount TYPE p DECIMALS 2.
+          lv_amount = ls_tea_now-price * 1.
+
+          SELECT SINGLE * FROM zuser_yzf0 INTO @DATA(ls_buyer_now)
+            WHERE userid = @gv_user_id.
+
+          IF sy-subrc <> 0.
+            MESSAGE '用户信息不存在，请重新登录。' TYPE 'E'.
+          ELSEIF ls_buyer_now-balance < lv_amount.
+            MESSAGE '余额不足，买不起！' TYPE 'E'.
+          ELSE.
+            " 开始事务：扣款 + 扣库存 + 生成订单
+            ls_buyer_now-balance = ls_buyer_now-balance - lv_amount.
+            MODIFY zuser_yzf0 FROM ls_buyer_now.
+            IF sy-subrc <> 0.
+              ROLLBACK WORK.
+              MESSAGE '扣款失败，请重试。' TYPE 'E'.
+              CLEAR ok_code.
+              RETURN.
+            ENDIF.
+
+            UPDATE ztea_yzf0
+              SET stock = stock - 1
+              WHERE tea_id = @ls_tea_now-tea_id
+                AND stock  >= 1.
+
+            IF sy-subrc <> 0.
+              ROLLBACK WORK.
+              MESSAGE '库存不足或商品已被抢购，请刷新后重试。' TYPE 'E'.
+              CLEAR ok_code.
+              RETURN.
+            ENDIF.
+
+            DATA lv_now_oid TYPE zorder_yzf0-order_id.
+            PERFORM get_next_order_id CHANGING lv_now_oid.
+
+            DATA ls_ord_now TYPE zorder_yzf0.
+            CLEAR ls_ord_now.
+            ls_ord_now-order_id   = lv_now_oid.
+            ls_ord_now-userid     = gv_user_id.
+            ls_ord_now-tea_id     = ls_tea_now-tea_id.
+            ls_ord_now-quantity   = 1.
+            ls_ord_now-amount     = lv_amount.
+            ls_ord_now-order_date = sy-datum.
+            ls_ord_now-status     = '1'.
+
+            INSERT zorder_yzf0 FROM ls_ord_now.
+            IF sy-subrc <> 0.
+              ROLLBACK WORK.
+              MESSAGE '订单创建失败，请重试。' TYPE 'E'.
+              CLEAR ok_code.
+              RETURN.
+            ENDIF.
+
+            COMMIT WORK.
+            MESSAGE '购买成功！' TYPE 'S'.
+            LEAVE TO SCREEN 500. " 原地刷新
+          ENDIF.
+        ENDIF.
+      ENDIF.
+
+    WHEN 'BACK' OR 'EXIT' OR 'CANCEL'.
+      IF go_alv_shop IS BOUND.
+        go_alv_shop->free( ).
+        FREE go_alv_shop.
+      ENDIF.
+      IF go_cont_shop IS BOUND.
+        go_cont_shop->free( ).
+        FREE go_cont_shop.
+      ENDIF.
+      LEAVE TO SCREEN 0.
+  ENDCASE.
+
+  CLEAR ok_code.
+ENDMODULE.
+
+* =========================================================
+* Screen 600 我的订单
+* =========================================================
+MODULE status_0600 OUTPUT.
+  REFRESH gt_my_show_fix.
+
+  SELECT * FROM zorder_yzf0 INTO TABLE gt_my_order
+    WHERE userid = gv_user_id.
+
+  DATA ls_my_show_fix LIKE LINE OF gt_my_show_fix.
+
+  LOOP AT gt_my_order INTO DATA(ls_db_my_fix).
+    CLEAR ls_my_show_fix.
+    MOVE-CORRESPONDING ls_db_my_fix TO ls_my_show_fix.
+
+    SELECT SINGLE tea_name FROM ztea_yzf0 INTO @ls_my_show_fix-tea_name
+      WHERE tea_id = @ls_db_my_fix-tea_id.
+
+    CASE ls_db_my_fix-status.
+      WHEN '1'. ls_my_show_fix-status_txt = '待发货'.
+      WHEN '2'. ls_my_show_fix-status_txt = '已发货(请确认收货)'.
+      WHEN '3'. ls_my_show_fix-status_txt = '已完成'.
+      WHEN OTHERS. ls_my_show_fix-status_txt = '未知'.
+    ENDCASE.
+
+    APPEND ls_my_show_fix TO gt_my_show_fix.
+  ENDLOOP.
+
+  IF go_cont_my IS INITIAL.
+    CREATE OBJECT go_cont_my EXPORTING container_name = 'CC_MY_ORD'.
+    CREATE OBJECT go_alv_my  EXPORTING i_parent = go_cont_my.
+
+    REFRESH gt_fcat.
+    CLEAR ls_fcat.
+
+    ls_fcat-fieldname = 'ORDER_ID'.   ls_fcat-coltext = '订单号'.   APPEND ls_fcat TO gt_fcat. CLEAR ls_fcat.
+    ls_fcat-fieldname = 'TEA_NAME'.   ls_fcat-coltext = '商品名称'. APPEND ls_fcat TO gt_fcat. CLEAR ls_fcat.
+    ls_fcat-fieldname = 'QUANTITY'.   ls_fcat-coltext = '购买数量'. APPEND ls_fcat TO gt_fcat. CLEAR ls_fcat.
+    ls_fcat-fieldname = 'AMOUNT'.     ls_fcat-coltext = '消费金额'. APPEND ls_fcat TO gt_fcat. CLEAR ls_fcat.
+    ls_fcat-fieldname = 'ORDER_DATE'. ls_fcat-coltext = '下单日期'. APPEND ls_fcat TO gt_fcat. CLEAR ls_fcat.
+    ls_fcat-fieldname = 'STATUS_TXT'. ls_fcat-coltext = '当前状态'. APPEND ls_fcat TO gt_fcat.
+
+    go_alv_my->set_table_for_first_display(
+      CHANGING
+        it_outtab       = gt_my_show_fix
+        it_fieldcatalog = gt_fcat
+    ).
+  ELSE.
+    IF go_alv_my IS BOUND.
+      go_alv_my->refresh_table_display( is_stable = VALUE lvc_s_stbl( row = 'X' col = 'X' ) ).
+    ENDIF.
+  ENDIF.
+ENDMODULE.
+
+MODULE user_command_0600 INPUT.
+  ok_code = sy-ucomm.
+
+  CASE ok_code.
+    WHEN 'CONFIRM_REC'.
+      DATA: lt_rows_fix TYPE lvc_t_row,
+            ls_row_fix  TYPE lvc_s_row.
+
+      IF go_alv_my IS NOT BOUND.
+        MESSAGE '列表未初始化，请返回后重新进入。' TYPE 'W'.
+        CLEAR ok_code.
+        RETURN.
+      ENDIF.
+
+      go_alv_my->get_selected_rows( IMPORTING et_index_rows = lt_rows_fix ).
+
+      IF lt_rows_fix IS INITIAL.
+        MESSAGE '请先选中一条订单！' TYPE 'W'.
+      ELSE.
+        READ TABLE lt_rows_fix INTO ls_row_fix INDEX 1.
+
+        " 以 ALV 真实显示表为准，避免排序/过滤后 index 与原表不一致
+        READ TABLE gt_my_show_fix INTO DATA(ls_my_sel) INDEX ls_row_fix-index.
+
+        IF sy-subrc <> 0.
+          MESSAGE '读取订单失败，请刷新后重试。' TYPE 'W'.
+        ELSEIF ls_my_sel-status = '2'.
+          UPDATE zorder_yzf0
+             SET status = '3'
+           WHERE order_id = @ls_my_sel-order_id
+             AND status   = '2'.
+
+          IF sy-subrc = 0.
+            COMMIT WORK.
+            MESSAGE '收货成功！' TYPE 'S'.
+            LEAVE TO SCREEN 600.
+          ELSE.
+            MESSAGE '收货失败，请重试。' TYPE 'E'.
+          ENDIF.
+
+        ELSEIF ls_my_sel-status = '1'.
+          MESSAGE '商家还没发货呢，别急！' TYPE 'W'.
+        ELSEIF ls_my_sel-status = '3'.
+          MESSAGE '这单已经收货了，不用重复点。' TYPE 'S'.
+        ELSE.
+          MESSAGE '未知状态，无法操作。' TYPE 'I'.
+        ENDIF.
+      ENDIF.
+
+    WHEN 'BACK' OR 'EXIT' OR 'CANCEL'.
+      IF go_alv_my IS BOUND.
+        go_alv_my->free( ).
+        FREE go_alv_my.
+      ENDIF.
+      IF go_cont_my IS BOUND.
+        go_cont_my->free( ).
+        FREE go_cont_my.
+      ENDIF.
+      LEAVE TO SCREEN 0.
+  ENDCASE.
+
+  CLEAR ok_code.
+ENDMODULE.
+
+* =========================================================
+* Screen 700 购物车
+* =========================================================
+MODULE status_0700 OUTPUT.
+  REFRESH gt_cart_show.
+
+  SELECT * FROM zcart_yzf0 INTO TABLE @DATA(lt_db_cart)
+    WHERE userid = @gv_user_id.
+
+  LOOP AT lt_db_cart INTO DATA(ls_db).
+    DATA ls_show TYPE ty_cart_show.
+    CLEAR ls_show.
+
+    ls_show-tea_id   = ls_db-tea_id.
+    ls_show-quantity = ls_db-quantity.
+
+    SELECT SINGLE tea_name FROM ztea_yzf0 INTO @ls_show-tea_name
+      WHERE tea_id = @ls_db-tea_id.
+
+    SELECT SINGLE price FROM ztea_yzf0 INTO @ls_show-price
+      WHERE tea_id = @ls_db-tea_id.
+
+    ls_show-total = ls_show-price * ls_show-quantity.
+    APPEND ls_show TO gt_cart_show.
+  ENDLOOP.
+
+  IF go_cont_cart IS INITIAL.
+    CREATE OBJECT go_cont_cart EXPORTING container_name = 'CC_CART'.
+    CREATE OBJECT go_alv_cart  EXPORTING i_parent = go_cont_cart.
+
+    REFRESH gt_fcat.
+    CLEAR ls_fcat.
+
+    ls_fcat-fieldname = 'TEA_NAME'. ls_fcat-coltext = '茶叶名称'. APPEND ls_fcat TO gt_fcat. CLEAR ls_fcat.
+    ls_fcat-fieldname = 'PRICE'.    ls_fcat-coltext = '单价'.     APPEND ls_fcat TO gt_fcat. CLEAR ls_fcat.
+    ls_fcat-fieldname = 'QUANTITY'. ls_fcat-coltext = '购买数量'. APPEND ls_fcat TO gt_fcat. CLEAR ls_fcat.
+    ls_fcat-fieldname = 'TOTAL'.    ls_fcat-coltext = '小计金额'. APPEND ls_fcat TO gt_fcat.
+
+    go_alv_cart->set_table_for_first_display(
+      CHANGING
+        it_outtab       = gt_cart_show
+        it_fieldcatalog = gt_fcat
+    ).
+  ELSE.
+    DATA ls_stable_cart TYPE lvc_s_stbl.
+    ls_stable_cart-row = 'X'.
+    ls_stable_cart-col = 'X'.
+    IF go_alv_cart IS BOUND.
+      go_alv_cart->refresh_table_display( is_stable = ls_stable_cart ).
+    ENDIF.
+  ENDIF.
+ENDMODULE.
+
+MODULE user_command_0700 INPUT.
+  ok_code = sy-ucomm.
+
+  CASE ok_code.
+    WHEN 'CHECKOUT'.
+      " 声明变量（不带初始值，避免只初始化一次的问题）
+      DATA: lv_total_pay TYPE p DECIMALS 2,
+            lv_first_oid TYPE zorder_yzf0-order_id,
+            lv_order_cnt TYPE i,
+            lv_new_oid   TYPE zorder_yzf0-order_id,
+            ls_new_order TYPE zorder_yzf0.
+
+      " 每次进入时手动清零
+      CLEAR: lv_total_pay, lv_first_oid, lv_order_cnt.
+
+      LOOP AT gt_cart_show INTO DATA(ls_item).
+        lv_total_pay = lv_total_pay + ls_item-total.
+      ENDLOOP.
+
+      IF lv_total_pay = 0.
+        MESSAGE '购物车是空的，不用结账！' TYPE 'W'.
+        CLEAR ok_code.
+        RETURN.
+      ENDIF.
+
+      SELECT SINGLE * FROM zuser_yzf0 INTO @DATA(ls_buyer)
+        WHERE userid = @gv_user_id.
+
+      IF sy-subrc <> 0.
+        MESSAGE '用户信息不存在，请重新登录。' TYPE 'E'.
+        CLEAR ok_code.
+        RETURN.
+      ENDIF.
+
+      IF ls_buyer-balance < lv_total_pay.
+        MESSAGE '余额不足！请去个人中心充值。' TYPE 'E'.
+        CLEAR ok_code.
+        RETURN.
+      ENDIF.
+
+      " 事务开始：扣款
+      ls_buyer-balance = ls_buyer-balance - lv_total_pay.
+      MODIFY zuser_yzf0 FROM ls_buyer.
+      IF sy-subrc <> 0.
+        ROLLBACK WORK.
+        MESSAGE '扣款失败，请重试。' TYPE 'E'.
+        CLEAR ok_code.
+        RETURN.
+      ENDIF.
+
+      LOOP AT gt_cart_show INTO ls_item.
+        UPDATE ztea_yzf0
+          SET stock = stock - @ls_item-quantity
+          WHERE tea_id = @ls_item-tea_id
+            AND stock  >= @ls_item-quantity.
+        IF sy-subrc <> 0.
+          ROLLBACK WORK.
+          MESSAGE '结账失败：库存不足（可能被其他人买走）。请刷新后重试。' TYPE 'E'.
+          CLEAR ok_code.
+          RETURN.
+        ENDIF.
+
+        " 为每个商品生成独立的订单号
+        CLEAR lv_new_oid.
+        PERFORM get_next_order_id CHANGING lv_new_oid.
+
+        " 记录第一个订单号用于提示
+        IF lv_order_cnt = 0.
+          lv_first_oid = lv_new_oid.
+        ENDIF.
+        lv_order_cnt = lv_order_cnt + 1.
+
+        CLEAR ls_new_order.
+        ls_new_order-order_id   = lv_new_oid.
+        ls_new_order-userid     = gv_user_id.
+        ls_new_order-tea_id     = ls_item-tea_id.
+        ls_new_order-quantity   = ls_item-quantity.
+        ls_new_order-amount     = ls_item-total.
+        ls_new_order-order_date = sy-datum.
+        ls_new_order-status     = '1'.
+
+        INSERT zorder_yzf0 FROM ls_new_order.
+        IF sy-subrc <> 0.
+          ROLLBACK WORK.
+          MESSAGE '写入订单失败，请重试。' TYPE 'E'.
+          CLEAR ok_code.
+          RETURN.
+        ENDIF.
+      ENDLOOP.
+
+      DELETE FROM zcart_yzf0 WHERE userid = @gv_user_id.
+      IF sy-subrc <> 0.
+        " 不致命：购物车为空也会 subrc=4，但这里通常无所谓
+      ENDIF.
+
+      COMMIT WORK.
+
+      " 根据订单数量给出不同提示
+      IF lv_order_cnt = 1.
+        MESSAGE '支付成功！您的订单号是：' && lv_first_oid TYPE 'S'.
+      ELSE.
+        MESSAGE |支付成功！已生成 { lv_order_cnt } 个订单，首单号：{ lv_first_oid }| TYPE 'S'.
+      ENDIF.
+
+      IF go_alv_cart IS BOUND.
+        go_alv_cart->free( ).
+        FREE go_alv_cart.
+      ENDIF.
+      IF go_cont_cart IS BOUND.
+        go_cont_cart->free( ).
+        FREE go_cont_cart.
+      ENDIF.
+      LEAVE TO SCREEN 0.
+
+    WHEN 'CLEAR_CART'.
+      DELETE FROM zcart_yzf0 WHERE userid = @gv_user_id.
+      COMMIT WORK.
+      MESSAGE '购物车已清空！' TYPE 'S'.
+      LEAVE TO SCREEN 0.
+
+    WHEN 'BACK' OR 'EXIT' OR 'CANCEL'.
+      IF go_alv_cart IS BOUND.
+        go_alv_cart->free( ).
+        FREE go_alv_cart.
+      ENDIF.
+      IF go_cont_cart IS BOUND.
+        go_cont_cart->free( ).
+        FREE go_cont_cart.
+      ENDIF.
+      LEAVE TO SCREEN 0.
+  ENDCASE.
+
+  CLEAR ok_code.
+ENDMODULE.
+
+* =========================================================
+* Screen 900 管理员菜单
+* =========================================================
+MODULE status_0900 OUTPUT.
+ENDMODULE.
+
+MODULE user_command_0900 INPUT.
+  ok_code = sy-ucomm.
+
+  CASE ok_code.
+    WHEN 'TEA_MGT'.
+      CALL SCREEN 300.
+    WHEN 'ORD_MGT'.
+      CALL SCREEN 400.
+    WHEN 'USR_MGT'.
+      CALL SCREEN 800.
+    WHEN 'MSG_MGT'.
+      CALL SCREEN 850.
+    WHEN 'EXIT' OR 'BACK' OR 'CANCEL'.
+      LEAVE TO SCREEN 100.
+  ENDCASE.
+
+  CLEAR ok_code.
+ENDMODULE.
+
+* =========================================================
+* Screen 800 用户管理（管理员）
+* =========================================================
+MODULE user_command_0800 INPUT.
+  ok_code = sy-ucomm.
+
+  DATA: lt_rows_u TYPE lvc_t_row,
+        ls_row_u  TYPE lvc_s_row.
+
+  IF go_alv_usr IS BOUND.
+    go_alv_usr->get_selected_rows( IMPORTING et_index_rows = lt_rows_u ).
+  ELSE.
+    REFRESH lt_rows_u.
+  ENDIF.
+
+  CASE ok_code.
+    WHEN 'EDIT_USR'.
+      IF lt_rows_u IS INITIAL.
+        MESSAGE '请先选中一个用户！' TYPE 'W'.
+      ELSE.
+        READ TABLE lt_rows_u INTO ls_row_u INDEX 1.
+        READ TABLE gt_user_mgt INTO DATA(ls_user_edit) INDEX ls_row_u-index.
+        IF sy-subrc <> 0.
+          MESSAGE '读取用户失败，请重试。' TYPE 'W'.
+          CLEAR ok_code.
+          RETURN.
+        ENDIF.
+
+        DATA: lt_fields TYPE TABLE OF sval,
+              ls_field  TYPE sval,
+              lv_code   TYPE char1.
+
+        REFRESH lt_fields.
+        CLEAR: ls_field, lv_code.
+
+        ls_field-tabname = 'ZUSER_YZF0'. ls_field-fieldname = 'PASSWORD'.
+        ls_field-fieldtext = '重置密码'. ls_field-value = ls_user_edit-password.
+        ls_field-field_attr = ' '. APPEND ls_field TO lt_fields.
+        CLEAR ls_field.
+
+        ls_field-tabname = 'ZUSER_YZF0'. ls_field-fieldname = 'BALANCE'.
+        ls_field-fieldtext = '调整余额'. ls_field-value = ls_user_edit-balance.
+        ls_field-field_attr = ' '. APPEND ls_field TO lt_fields.
+        CLEAR ls_field.
+
+        ls_field-tabname = 'ZUSER_YZF0'. ls_field-fieldname = 'PHONE'.
+        ls_field-fieldtext = '修改手机'. ls_field-value = ls_user_edit-phone.
+        ls_field-field_attr = ' '. APPEND ls_field TO lt_fields.
+
+        CALL FUNCTION 'POPUP_GET_VALUES'
+          EXPORTING popup_title = '管理员修改用户信息'
+          IMPORTING returncode  = lv_code
+          TABLES    fields      = lt_fields.
+
+        IF lv_code = ''.
+          READ TABLE lt_fields INTO ls_field INDEX 1. IF sy-subrc = 0. ls_user_edit-password = ls_field-value. ENDIF.
+          READ TABLE lt_fields INTO ls_field INDEX 2. IF sy-subrc = 0. ls_user_edit-balance  = ls_field-value. ENDIF.
+          READ TABLE lt_fields INTO ls_field INDEX 3. IF sy-subrc = 0. ls_user_edit-phone    = ls_field-value. ENDIF.
+
+          UPDATE zuser_yzf0 SET password = @ls_user_edit-password,
+                                balance  = @ls_user_edit-balance,
+                                phone    = @ls_user_edit-phone
+            WHERE userid = @ls_user_edit-userid.
+
+          IF sy-subrc = 0.
+            COMMIT WORK.
+            MESSAGE '用户信息更新成功！' TYPE 'S'.
+            LEAVE TO SCREEN 800.
+          ELSE.
+            MESSAGE '更新失败，请重试。' TYPE 'E'.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+
+    WHEN 'DEL_USR'.
+      IF lt_rows_u IS INITIAL.
+        MESSAGE '请先选中一个用户！' TYPE 'W'.
+      ELSE.
+        DATA lv_ans TYPE char1.
+        CALL FUNCTION 'POPUP_TO_CONFIRM'
+          EXPORTING
+            titlebar      = '删除确认'
+            text_question = '确定要注销该用户吗？'
+            text_button_1 = '是'
+            text_button_2 = '否'
+          IMPORTING
+            answer        = lv_ans.
+
+        IF lv_ans = '1'.
+          READ TABLE lt_rows_u INTO ls_row_u INDEX 1.
+          READ TABLE gt_user_mgt INTO DATA(ls_user_del) INDEX ls_row_u-index.
+
+          IF sy-subrc = 0.
+            DELETE FROM zuser_yzf0 WHERE userid = @ls_user_del-userid.
+            IF sy-subrc = 0.
+              COMMIT WORK.
+              MESSAGE '用户已注销。' TYPE 'S'.
+              LEAVE TO SCREEN 800.
+            ELSE.
+              MESSAGE '注销失败，请重试。' TYPE 'E'.
+            ENDIF.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+
+    WHEN 'BACK' OR 'EXIT' OR 'CANCEL'.
+      IF go_alv_usr IS BOUND.
+        go_alv_usr->free( ).
+        FREE go_alv_usr.
+      ENDIF.
+      IF go_cont_usr IS BOUND.
+        go_cont_usr->free( ).
+        FREE go_cont_usr.
+      ENDIF.
+      LEAVE TO SCREEN 0.
+  ENDCASE.
+
+  CLEAR ok_code.
+ENDMODULE.
+
+MODULE status_0800 OUTPUT.
+  SELECT * FROM zuser_yzf0 INTO TABLE gt_user_mgt.
+
+  IF gt_fcat_usr IS INITIAL.
+    CLEAR ls_fcat_usr.
+
+    ls_fcat_usr-fieldname = 'USERID'.  ls_fcat_usr-coltext = '用户账号'.  ls_fcat_usr-col_pos = 1. APPEND ls_fcat_usr TO gt_fcat_usr.
+    CLEAR ls_fcat_usr.
+    ls_fcat_usr-fieldname = 'PASSWORD'. ls_fcat_usr-coltext = '登录密码'. ls_fcat_usr-col_pos = 2. APPEND ls_fcat_usr TO gt_fcat_usr.
+    CLEAR ls_fcat_usr.
+    ls_fcat_usr-fieldname = 'BALANCE'.  ls_fcat_usr-coltext = '钱包余额'. ls_fcat_usr-col_pos = 3. APPEND ls_fcat_usr TO gt_fcat_usr.
+    CLEAR ls_fcat_usr.
+    ls_fcat_usr-fieldname = 'PHONE'.    ls_fcat_usr-coltext = '手机号码'. ls_fcat_usr-col_pos = 4. APPEND ls_fcat_usr TO gt_fcat_usr.
+    CLEAR ls_fcat_usr.
+    ls_fcat_usr-fieldname = 'ADDRESS'.  ls_fcat_usr-coltext = '收货地址'. ls_fcat_usr-col_pos = 5. APPEND ls_fcat_usr TO gt_fcat_usr.
+  ENDIF.
+
+  IF go_alv_usr IS NOT BOUND.
+    CREATE OBJECT go_cont_usr
+      EXPORTING container_name = 'USER_CONTAINER'.
+
+    CREATE OBJECT go_alv_usr
+      EXPORTING i_parent = go_cont_usr.
+
+    go_alv_usr->set_table_for_first_display(
+      EXPORTING
+        is_layout       = VALUE lvc_s_layo( grid_title = '用户管理列表' cwidth_opt = 'X' )
+      CHANGING
+        it_outtab       = gt_user_mgt
+        it_fieldcatalog = gt_fcat_usr
+    ).
+  ELSE.
+    DATA ls_stable TYPE lvc_s_stbl.
+    ls_stable-row = 'X'.
+    ls_stable-col = 'X'.
+    go_alv_usr->refresh_table_display( is_stable = ls_stable ).
+  ENDIF.
+ENDMODULE.
+
+* =========================================================
+* Screen 850 留言板（用户发、管理员回）
+* =========================================================
+MODULE status_0850 OUTPUT.
+  SELECT * FROM zmsg_yzf0 INTO TABLE gt_msg
+    ORDER BY msg_date DESCENDING msg_time DESCENDING.
+
+  " 服务端权限：以登录角色为准（更快也更可靠）
+  IF gv_user_role = 'A'.
+    gv_is_admin = abap_true.
+  ELSE.
+    gv_is_admin = abap_false.
+  ENDIF.
+
+  IF go_cont_msg IS INITIAL.
+    CREATE OBJECT go_cont_msg
+      EXPORTING container_name = 'MSG_CONTAINER'.
+
+    CREATE OBJECT go_alv_msg
+      EXPORTING i_parent = go_cont_msg.
+
+    DATA: lt_fcat_msg TYPE lvc_t_fcat,
+          ls_fcat_msg TYPE lvc_s_fcat.
+
+    REFRESH lt_fcat_msg.
+    CLEAR ls_fcat_msg.
+
+    ls_fcat_msg-fieldname = 'USERID'.   ls_fcat_msg-coltext = '留言人'.         APPEND ls_fcat_msg TO lt_fcat_msg. CLEAR ls_fcat_msg.
+    ls_fcat_msg-fieldname = 'CONTENT'.  ls_fcat_msg-coltext = '内容'.           APPEND ls_fcat_msg TO lt_fcat_msg. CLEAR ls_fcat_msg.
+    ls_fcat_msg-fieldname = 'MSG_DATE'. ls_fcat_msg-coltext = '日期'.           APPEND ls_fcat_msg TO lt_fcat_msg. CLEAR ls_fcat_msg.
+    ls_fcat_msg-fieldname = 'MSG_TIME'. ls_fcat_msg-coltext = '时间'.           APPEND ls_fcat_msg TO lt_fcat_msg. CLEAR ls_fcat_msg.
+    ls_fcat_msg-fieldname = 'REPLY'.    ls_fcat_msg-coltext = '商家回复(新)'.   APPEND ls_fcat_msg TO lt_fcat_msg.
+
+    go_alv_msg->set_table_for_first_display(
+      CHANGING
+        it_outtab       = gt_msg
+        it_fieldcatalog = lt_fcat_msg
+    ).
+  ELSE.
+    DATA ls_stable_msg TYPE lvc_s_stbl.
+    ls_stable_msg-row = 'X'.
+    ls_stable_msg-col = 'X'.
+    go_alv_msg->refresh_table_display( is_stable = ls_stable_msg ).
+  ENDIF.
+
+  " UI 层控制：隐藏/显示（但仍需服务端校验）
+  LOOP AT SCREEN.
+    IF gv_is_admin = abap_false.
+      IF screen-group1 = 'ADM'.
+        screen-active = '0'.
+        MODIFY SCREEN.
+      ENDIF.
+    ELSE.
+      IF screen-group1 = 'USR'.
+        screen-active = '0'.
+        MODIFY SCREEN.
+      ENDIF.
+    ENDIF.
+  ENDLOOP.
+ENDMODULE.
+
+MODULE user_command_0850 INPUT.
+  ok_code = sy-ucomm.
+
+  CASE ok_code.
+    WHEN 'POST'.
+      IF gv_is_admin = abap_true.
+        MESSAGE '管理员不允许发布留言（仅回复）。' TYPE 'W'.
+        CLEAR ok_code.
+        RETURN.
+      ENDIF.
+
+      IF gv_msg_input IS INITIAL.
+        MESSAGE '写点什么再发布吧！' TYPE 'W'.
+      ELSE.
+        DATA ls_new_msg TYPE zmsg_yzf0.
+        CLEAR ls_new_msg.
+
+        ls_new_msg-msg_id   = sy-uzeit.
+        ls_new_msg-userid   = gv_user_id.
+        ls_new_msg-content  = gv_msg_input.
+        ls_new_msg-msg_date = sy-datum.
+        ls_new_msg-msg_time = sy-uzeit.
+
+        INSERT zmsg_yzf0 FROM ls_new_msg.
+        IF sy-subrc = 0.
+          COMMIT WORK.
+          MESSAGE '留言发布成功！' TYPE 'S'.
+          CLEAR gv_msg_input.
+        ELSE.
+          MESSAGE '发布失败，请重试。' TYPE 'E'.
+        ENDIF.
+      ENDIF.
+      LEAVE TO SCREEN 850.
+
+    WHEN 'REPLY_MSG'.
+      IF gv_is_admin = abap_false.
+        MESSAGE '权限不足：只有管理员可以回复。' TYPE 'E'.
+        CLEAR ok_code.
+        RETURN.
+      ENDIF.
+
+      DATA: lt_rows_r TYPE lvc_t_row,
+            ls_row_r  TYPE lvc_s_row.
+
+      IF go_alv_msg IS NOT BOUND.
+        MESSAGE '列表未初始化，请返回后重新进入留言板。' TYPE 'W'.
+        CLEAR ok_code.
+        RETURN.
+      ENDIF.
+
+      go_alv_msg->get_selected_rows( IMPORTING et_index_rows = lt_rows_r ).
+
+      IF lt_rows_r IS INITIAL.
+        MESSAGE '请先选中一条要回复的留言！' TYPE 'W'.
+      ELSE.
+        READ TABLE lt_rows_r INTO ls_row_r INDEX 1.
+        READ TABLE gt_msg INTO DATA(ls_msg_target) INDEX ls_row_r-index.
+        IF sy-subrc <> 0.
+          MESSAGE '读取留言失败，请重试。' TYPE 'W'.
+          CLEAR ok_code.
+          RETURN.
+        ENDIF.
+
+        DATA: lv_code_msg   TYPE c,
+              lt_fields_msg TYPE TABLE OF sval,
+              ls_field_msg  TYPE sval.
+
+        REFRESH lt_fields_msg.
+        CLEAR: ls_field_msg, lv_code_msg.
+
+        ls_field_msg-tabname   = 'ZMSG_YZF0'.
+        ls_field_msg-fieldname = 'REPLY'.
+        ls_field_msg-fieldtext = '请输入回复内容'.
+        APPEND ls_field_msg TO lt_fields_msg.
+
+        CALL FUNCTION 'POPUP_GET_VALUES'
+          EXPORTING
+            popup_title = '商家回复'
+          IMPORTING
+            returncode  = lv_code_msg
+          TABLES
+            fields      = lt_fields_msg.
+
+        IF lv_code_msg = ''.
+          READ TABLE lt_fields_msg INTO ls_field_msg INDEX 1.
+          IF sy-subrc = 0 AND ls_field_msg-value IS NOT INITIAL.
+            UPDATE zmsg_yzf0 SET reply = @ls_field_msg-value
+              WHERE msg_id = @ls_msg_target-msg_id.
+
+            IF sy-subrc = 0.
+              COMMIT WORK.
+              MESSAGE '回复成功！' TYPE 'S'.
+              LEAVE TO SCREEN 850.
+            ELSE.
+              MESSAGE '回复失败，请重试。' TYPE 'E'.
+            ENDIF.
+          ELSE.
+            MESSAGE '回复内容不能为空。' TYPE 'W'.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+
+    WHEN 'BACK' OR 'EXIT' OR 'CANCEL'.
+      IF go_alv_msg IS BOUND.
+        go_alv_msg->free( ).
+        FREE go_alv_msg.
+      ENDIF.
+      IF go_cont_msg IS BOUND.
+        go_cont_msg->free( ).
+        FREE go_cont_msg.
+      ENDIF.
+      LEAVE TO SCREEN 0.
+  ENDCASE.
+
+  CLEAR ok_code.
+ENDMODULE.
